@@ -1,14 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +14,7 @@ import (
 )
 
 var (
+	write       = flag.Bool("w", false, "write result to (source) file instead of stdout")
 	localPrefix = flag.String("local", "", "put imports beginning with this string after 3rd-party packages; comma-separated list")
 )
 
@@ -24,79 +23,107 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+
+	failed := false
 	go func() {
 		for _, file := range flag.Args() {
-			if err := fixImports(ctx, file); err != nil {
-				log.Printf("FAIL: %s %s", file, err)
+			if err := processFile(ctx, file); err != nil {
+				if e, ok := err.(*exec.ExitError); ok {
+					os.Exit(e.ExitCode())
+				}
+				fmt.Fprintf(os.Stderr, "FAIL: %s %s\n", file, err)
+				failed = true
 			}
 		}
 		cancel()
 	}()
 	<-ctx.Done()
+
+	if failed {
+		os.Exit(2)
+	}
 }
 
-func fixImports(ctx context.Context, file string) error {
-	var perm os.FileMode = 0600
-	f, err := os.OpenFile(file, os.O_RDONLY, perm)
+func processFile(ctx context.Context, file string) error {
+	src, err := formatCode(ctx, nil, file)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	src, err := ioutil.ReadAll(f)
+	s, err := ParseSourceFile(bytes.NewBuffer(src))
 	if err != nil {
-		return err
+		return fmt.Errorf("parse source file: %s", err)
 	}
-	hash := sha256.New()
-	hash.Write(src)
-	h1 := hash.Sum(nil)
-
-	s := ParseSourceFile(src)
 
 	buf := bytes.NewBuffer(nil)
 	buf.Write(s.PackageClause)
 	for _, b := range s.ImportDecl {
+		if bytes.Equal(b, []byte("\n")) {
+			// ignore empty line
+			continue
+		}
+		if bytes.HasPrefix(b, []byte("\t//")) {
+			// ignore commented line
+			continue
+		}
 		buf.Write(b)
 	}
 	buf.Write(s.TopLevelDecl)
 
-	cmd := exec.CommandContext(ctx, "goimports")
+	var args []string
 	if *localPrefix != "" {
-		cmd.Args = append(cmd.Args, "-local", *localPrefix)
+		args = append(args, "-local", *localPrefix)
 	}
-	var b1 bytes.Buffer
-	var b2 bytes.Buffer
-	cmd.Stdout = &b1
-	cmd.Stderr = &b2
-	cmd.Stdin = buf
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s %s", string(bytes.ReplaceAll(b2.Bytes(), []byte("<standard input>"), []byte(file))), err)
-	}
-
-	hash = sha256.New()
-	hash.Write(b1.Bytes())
-	h2 := hash.Sum(nil)
-
-	if bytes.Equal(h1, h2) {
-		// No change
-		return nil
-	}
-
-	if err := writeFile(file, &b1, perm); err != nil {
+	dst, err := formatCode(ctx, buf, "", args...)
+	if err != nil {
 		return err
+	}
+
+	if *write {
+		if err := os.WriteFile(file, dst, 0600); err != nil {
+			return err
+		}
+	} else {
+		if _, err := io.Copy(os.Stdout, bytes.NewReader(dst)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func writeFile(name string, r io.Reader, perm os.FileMode) error {
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
+func formatCode(ctx context.Context, r io.Reader, file string, arg ...string) (formattedCode []byte, err error) {
+	cmd := exec.CommandContext(ctx, "goimports")
+	if len(arg) != 0 {
+		cmd.Args = append(cmd.Args, arg...)
 	}
-	_, err = io.Copy(f, r)
-	if err1 := f.Close(); err1 != nil && err == nil {
-		err = err1
+	if file != "" {
+		cmd.Args = append(cmd.Args, file)
 	}
-	return err
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	if file != "" {
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stderr = &stderr
+	}
+	if r != nil {
+		cmd.Stdin = r
+	}
+
+	if err := cmd.Run(); err != nil {
+		if file != "" {
+			return nil, err
+		}
+		r := bufio.NewReader(&stderr)
+		for {
+			b, err2 := r.ReadBytes('\n')
+			if err2 == io.EOF {
+				return nil, err
+			}
+			os.Stderr.Write(bytes.Replace(b, []byte("<standard input>"), []byte(file), 1))
+		}
+	}
+	return stdout.Bytes(), nil
 }

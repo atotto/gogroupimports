@@ -30,7 +30,8 @@ import (
 ## Installation
 
 ```
-go install github.com/atotto/gofiximports
+go install github.com/atotto/gofiximports@latest
+go install golang.org/x/tools/cmd/goimports@latest
 ```
 
 ## Example of use
@@ -53,7 +54,7 @@ import (
 ```
 
 ```
-gogroupimports -local github.com/atotto/awsome -w foo.go
+gogroupimports -local github.com/atotto/awesome -w foo.go
 ```
 
 after:
@@ -77,7 +78,7 @@ import (
 The [goimports](https://pkg.go.dev/golang.org/x/tools/cmd/goimports) tool does not delete empty line. Like this:
 
 ```
-goimports -local github.com/atotto/awsome -w foo.go
+goimports -local github.com/atotto/awesome -w foo.go
 ```
 
 ```go
