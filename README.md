@@ -30,7 +30,7 @@ import (
 ## Installation
 
 ```
-go install github.com/atotto/gofiximports@latest
+go install github.com/atotto/gogroupimports@latest
 go install golang.org/x/tools/cmd/goimports@latest
 ```
 
